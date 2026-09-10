@@ -559,8 +559,11 @@ with tab2:
     elif st.button("Run screening", type="primary"):
         with st.spinner("Loading model and screening..."):
             progress = st.progress(0)
-            buckets = screen_batch(st.session_state["filtered_articles"], confidence_threshold,
-                                    lambda i, t: progress.progress(i / t))
+            buckets = screen_batch(
+                st.session_state["filtered_articles"],
+                confidence_threshold,
+                progress_callback=lambda i, t: progress.progress(i / t),
+            )
             st.session_state["screening_buckets"] = buckets
         st.success(f"Relevant: {len(buckets['relevant'])}, needs review: {len(buckets['needs_review'])}, "
                    f"not relevant: {len(buckets['not_relevant'])}")
