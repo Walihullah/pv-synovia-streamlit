@@ -1,0 +1,57 @@
+name: Test Streamlit app
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+
+      - name: Compile Python source
+        run: python -m compileall -q app.py
+
+      - name: Start Streamlit app
+        run: |
+          streamlit run app.py --server.headless true --server.port 8501 > streamlit.log 2>&1 &
+          echo $! > streamlit.pid
+
+      - name: Smoke test HTTP endpoint
+        run: |
+          for attempt in {1..30}; do
+            if curl --fail --silent --show-error http://127.0.0.1:8501/ > /dev/null; then
+              echo "Streamlit app responded successfully."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Streamlit did not become ready. Server log:"
+          cat streamlit.log
+          exit 1
+
+      - name: Stop Streamlit app
+        if: always()
+        run: |
+          if [ -f streamlit.pid ]; then
+            kill "$(cat streamlit.pid)" || true
+          fi
