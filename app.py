@@ -202,14 +202,17 @@ CANDIDATE_LABELS = ["reports a drug safety issue, adverse event, or manufacturin
                      "does not relate to drug safety"]
 @st.cache_resource(show_spinner=False)
 def _get_classifier():
-    """Load the lightweight classifier once and reuse it across reruns/users."""
-    from transformers import pipeline
-    import torch
-    return pipeline(
-        "zero-shot-classification",
-        model="MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
-        device=0 if torch.cuda.is_available() else -1,
-    )
+    """Load the optional classifier; return None if ML dependencies are unavailable."""
+    try:
+        from transformers import pipeline
+        import torch
+        return pipeline(
+            "zero-shot-classification",
+            model="MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+            device=0 if torch.cuda.is_available() else -1,
+        )
+    except (ImportError, OSError, RuntimeError):
+        return None
 
 MAX_CHARS_FOR_CLASSIFICATION = 1000  # truncate long abstracts for faster classification
 
@@ -239,16 +242,31 @@ def screen_batch(articles, confidence_threshold=0.6, batch_size=16, progress_cal
     done = 0
     for start in range(0, total, batch_size):
         batch_texts = texts[start:start + batch_size]
-        batch_results = classifier(batch_texts, CANDIDATE_LABELS, multi_label=False)
-        if isinstance(batch_results, dict):
-            batch_results = [batch_results]
+        if classifier is not None:
+            batch_results = classifier(batch_texts, CANDIDATE_LABELS, multi_label=False)
+            if isinstance(batch_results, dict):
+                batch_results = [batch_results]
+        else:
+            batch_results = []
+            for text in batch_texts:
+                lowered = text.lower()
+                hits = sum(lowered.count(term) for term in SAFETY_TERMS)
+                relevant = hits > 0 or any(term in lowered for term in MANUFACTURING_KEYWORDS)
+                batch_results.append({
+                    "labels": [CANDIDATE_LABELS[0] if relevant else CANDIDATE_LABELS[1]],
+                    "scores": [min(0.95, 0.65 + 0.1 * hits) if relevant else 0.75],
+                })
         for offset, result in enumerate(batch_results):
             orig_idx = indices[start + offset]
             top_label, top_score = result["labels"][0], result["scores"][0]
             results_by_index[orig_idx] = {
                 "relevant": top_label == CANDIDATE_LABELS[0],
                 "confidence": round(top_score, 3),
-                "reason": f"zero-shot top label: '{top_label}' (score={top_score:.2f})",
+                "reason": (
+                    f"zero-shot top label: '{top_label}' (score={top_score:.2f})"
+                    if classifier is not None else
+                    f"built-in keyword fallback (score={top_score:.2f})"
+                ),
             }
         done = min(start + batch_size, total)
         if progress_callback:

@@ -11,7 +11,7 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-The first screening run downloads the lightweight Hugging Face model `MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33`. The model is loaded once with `st.cache_resource`. BanglaJOL and PubMed results are cached with `st.cache_data` for 15 minutes and at most eight query combinations are retained, reducing repeated downloads and CPU use during Streamlit reruns.
+If the optional Hugging Face dependencies are available, the first screening run downloads the lightweight model `MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33`, loaded once with `st.cache_resource`. Lightweight deployments use the built-in keyword fallback instead, so startup does not depend on the large PyTorch package. BanglaJOL and PubMed results are cached with `st.cache_data` for 15 minutes and at most eight query combinations are retained, reducing repeated downloads and CPU use during Streamlit reruns.
 
 ## Deploy on Streamlit Community Cloud
 
