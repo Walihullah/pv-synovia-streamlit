@@ -463,7 +463,41 @@ selected_categories = st.sidebar.multiselect(
     options=list(SYNOVIA_SEARCH_STRINGS.keys()),
     default=list(SYNOVIA_SEARCH_STRINGS.keys()),
 )
-active_search_strings = {k: v for k, v in SYNOVIA_SEARCH_STRINGS.items() if k in selected_categories}
+
+available_products = [
+    product
+    for category in selected_categories
+    for product in SYNOVIA_SEARCH_STRINGS[category]
+]
+product_query = st.sidebar.text_input(
+    "Search products",
+    placeholder="Type a product name, e.g. metformin",
+    help="Filter the product list below, then select one or more products for screening.",
+)
+matching_products = [
+    product for product in available_products
+    if product_query.strip().lower() in product.lower()
+]
+selected_products = st.sidebar.multiselect(
+    "Products to screen",
+    options=matching_products,
+    default=matching_products,
+    help="The selected products determine the BanglaJOL and PubMed search queries.",
+)
+selected_product_set = set(selected_products)
+active_search_strings = {
+    category: [product for product in SYNOVIA_SEARCH_STRINGS[category]
+               if product in selected_product_set]
+    for category in selected_categories
+}
+active_search_strings = {
+    category: products for category, products in active_search_strings.items() if products
+}
+
+if product_query.strip() and not matching_products:
+    st.sidebar.warning("No products match that search.")
+elif not selected_products:
+    st.sidebar.info("Select at least one product to run screening.")
 
 days_back = st.sidebar.slider("Days back to harvest", 7, 730, 365, 7)
 selected_journals = st.sidebar.multiselect("BanglaJOL journals", list(JOURNAL_WATCHLIST.keys()),
