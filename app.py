@@ -10,6 +10,7 @@ import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, asdict
 from datetime import date, timedelta
+from urllib.parse import quote_plus
 
 import pandas as pd
 import requests
@@ -71,6 +72,31 @@ class Article:
     record_id: str; title: str; abstract: str; journal: str; journal_code: str
     pub_date: str; authors: list; matched_category: str; matched_drug: str
     source: str = "banglajol"
+
+def source_url(article):
+    """Return a stable human-readable source URL for an article record."""
+    source = str(article.get("source", "")).lower()
+    pmid = str(article.get("pmid", "") or "").strip()
+    if source == "pubmed" and pmid:
+        return f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+    record_id = str(article.get("record_id", "") or "").strip()
+    if record_id.startswith(("http://", "https://")):
+        return record_id
+    journal_code = str(article.get("journal_code", "") or "").strip()
+    match = re.search(r"(?:article/(?:view/)?|[:/])(\d+)(?:$|[/?#])", record_id)
+    if match and journal_code:
+        return f"https://www.banglajol.info/index.php/{journal_code}/article/view/{match.group(1)}"
+    if journal_code and article.get("title"):
+        query = quote_plus(str(article["title"]))
+        return f"https://www.banglajol.info/index.php/{journal_code}/search/search?query={query}"
+    return record_id
+
+def add_source_links(frame):
+    """Add a source link column without changing the report's existing fields."""
+    frame = frame.copy()
+    if "source_url" not in frame.columns:
+        frame["source_url"] = frame.apply(source_url, axis=1)
+    return frame
 
 def _parse_oai_dc_record(record_el, journal_code, journal_name):
     header = record_el.find("oai:header", OAI_NS)
@@ -141,6 +167,7 @@ def run_banglajol_ingestion(search_strings, safety_terms, days_back, journals):
         d["pmid"] = a.record_id
         d["query_term"] = a.matched_drug
         d["source"] = "banglajol"
+        d["source_url"] = source_url(d)
         out.append(d)
     return out
 
@@ -194,6 +221,7 @@ def run_pubmed_ingestion(search_strings, safety_terms, days_back=30):
                             for a in art.findall(".//Author") if a.find("LastName") is not None],
                 "matched_category": category, "matched_drug": hit_drug,
                 "query_term": hit_drug, "source": "pubmed",
+                "source_url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
             })
     return out
 
@@ -330,7 +358,9 @@ def extract_case(article):
     demo_match = DEMOGRAPHIC_PATTERN.search(text)
     count_match = CASE_COUNT_PATTERN.search(text)
     return {
-        "pmid": article.get("pmid", ""), "drug_name": article.get("matched_drug", ""),
+        "pmid": article.get("pmid", ""), "title": article.get("title", ""),
+        "source": article.get("source", ""), "source_url": source_url(article),
+        "drug_name": article.get("matched_drug", ""),
         "category": article.get("matched_category", ""),
         "adverse_event_term": "not auto-extracted - see title/abstract",
         "severity": detect_severity(text),
@@ -425,9 +455,13 @@ def proxy_event_category(c):
 
 def rank_signals(cases):
     counts = {}
+    source_links = {}
     for c in cases:
         key = (c["drug_name"], proxy_event_category(c))
         counts[key] = counts.get(key, 0) + (c.get("case_count") or 1)
+        link = c.get("source_url", "")
+        if link:
+            source_links.setdefault(key, set()).add(link)
     drugs = {k[0] for k in counts}
     events = {k[1] for k in counts}
     total = sum(counts.values())
@@ -443,7 +477,9 @@ def rank_signals(cases):
             c_ = event_total - a
             d_ = total - drug_total - event_total + a
             stats = evaluate_signal(ContingencyTable(a, b, c_, d_))
-            results.append({"drug": drug, "event": event, "num_reports": a, **stats})
+            results.append({"drug": drug, "event": event, "num_reports": a,
+                            "source_url": "; ".join(sorted(source_links.get((drug, event), set()))),
+                            **stats})
     results.sort(key=lambda r: r["prr"], reverse=True)
     return results
 
@@ -573,7 +609,7 @@ with tab0:
 
     if st.session_state["ranked_cases"]:
         st.subheader("Prioritized review queue")
-        df = pd.DataFrame(st.session_state["ranked_cases"])
+        df = add_source_links(pd.DataFrame(st.session_state["ranked_cases"]))
         st.dataframe(df, use_container_width=True)
         st.download_button("Download reviewer CSV", df.to_csv(index=False),
                             "pv_review_queue.csv", "text/csv", key="search_tab_download")
@@ -600,8 +636,11 @@ with tab1:
             st.session_state["filtered_articles"] = merged
         st.success(f"BanglaJOL: {len(banglajol)}, PubMed: {len(pubmed)}, total after dedup: {len(merged)}")
     if st.session_state["filtered_articles"]:
-        st.dataframe(pd.DataFrame(st.session_state["filtered_articles"])[
-            ["pmid", "title", "source", "matched_category", "matched_drug", "pub_date"]], use_container_width=True)
+        ingestion_df = add_source_links(pd.DataFrame(st.session_state["filtered_articles"])[
+            ["pmid", "title", "source", "matched_category", "matched_drug", "pub_date"]])
+        st.dataframe(ingestion_df, use_container_width=True)
+        st.download_button("Download ingestion report", ingestion_df.to_csv(index=False),
+                           "pv_ingestion_report.csv", "text/csv", key="ingestion_download")
 
 with tab2:
     st.header("Step 2 - AI relevance screening (lightweight model)")
@@ -623,10 +662,15 @@ with tab2:
         b = st.session_state["screening_buckets"]
         all_screened = b["relevant"] + b["needs_review"] + b["not_relevant"]
         if all_screened:
-            st.dataframe(pd.DataFrame([{"pmid": a["pmid"], "title": a["title"], "relevant": a["screening"]["relevant"],
-                                         "confidence": a["screening"]["confidence"], "reason": a["screening"]["reason"]}
-                                        for a in all_screened]).sort_values("confidence", ascending=False),
-                         use_container_width=True)
+            screening_df = add_source_links(pd.DataFrame([
+                {"pmid": a["pmid"], "title": a["title"], "source": a.get("source", ""),
+                 "source_url": a.get("source_url", source_url(a)),
+                 "relevant": a["screening"]["relevant"], "confidence": a["screening"]["confidence"],
+                 "reason": a["screening"]["reason"]}
+                for a in all_screened]).sort_values("confidence", ascending=False))
+            st.dataframe(screening_df, use_container_width=True)
+            st.download_button("Download screening report", screening_df.to_csv(index=False),
+                               "pv_screening_report.csv", "text/csv", key="screening_download")
 
 with tab3:
     st.header("Step 3 - Structured extraction (free, rule-based)")
@@ -638,7 +682,10 @@ with tab3:
         st.session_state["extracted_cases"] = cases
         st.success(f"Extracted {len(cases)} cases.")
     if st.session_state["extracted_cases"]:
-        st.dataframe(pd.DataFrame(st.session_state["extracted_cases"]), use_container_width=True)
+        extraction_df = add_source_links(pd.DataFrame(st.session_state["extracted_cases"]))
+        st.dataframe(extraction_df, use_container_width=True)
+        st.download_button("Download extraction report", extraction_df.to_csv(index=False),
+                           "pv_extraction_report.csv", "text/csv", key="extraction_download")
 
 with tab4:
     st.header("Step 4 - Prioritization")
@@ -649,9 +696,10 @@ with tab4:
         st.session_state["ranked_cases"] = ranked
         st.success(f"Ranked {len(ranked)} cases.")
     if st.session_state["ranked_cases"]:
-        df = pd.DataFrame(st.session_state["ranked_cases"])
+        df = add_source_links(pd.DataFrame(st.session_state["ranked_cases"]))
         st.dataframe(df, use_container_width=True)
-        st.download_button("Download reviewer CSV", df.to_csv(index=False), "pv_review_queue.csv", "text/csv")
+        st.download_button("Download prioritization report", df.to_csv(index=False),
+                           "pv_prioritization_report.csv", "text/csv", key="prioritization_download")
 
 with tab5:
     st.header("Step 5 - Signal detection (PRR/ROR)")
@@ -662,4 +710,7 @@ with tab5:
         st.session_state["ranked_signals"] = rank_signals(st.session_state["extracted_cases"])
         st.success(f"Ranked {len(st.session_state['ranked_signals'])} drug-event pairs.")
     if st.session_state["ranked_signals"]:
-        st.dataframe(pd.DataFrame(st.session_state["ranked_signals"]), use_container_width=True)
+        signals_df = add_source_links(pd.DataFrame(st.session_state["ranked_signals"]))
+        st.dataframe(signals_df, use_container_width=True)
+        st.download_button("Download signal detection report", signals_df.to_csv(index=False),
+                           "pv_signal_detection_report.csv", "text/csv", key="signal_download")
